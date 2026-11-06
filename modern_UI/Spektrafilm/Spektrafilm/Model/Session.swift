@@ -1670,6 +1670,8 @@ final class Session: CanvasHost {
     func selectAllFrames() {
         guard canSelectAllFrames else { return }
         picked = Set(visibleFrames.map(\.id))
+        // The open frame stays in the set even when the filter hides it.
+        if let selection { picked.insert(selection) }
         if selection == nil, let first = visibleFrames.first { select(first.id) }
     }
 
