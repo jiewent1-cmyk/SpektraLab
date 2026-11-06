@@ -811,11 +811,20 @@ final class Session: CanvasHost {
         scheduleFullRender()
     }
 
-    /// Keep explicit inspection active across live edits; zoom uses the same
-    /// threshold as viewportChanged, including the existing 100% menu action.
+    /// Only a zoom past the preview tier needs the frame's own pixels: the
+    /// canvas is soft there without them. Comparing and show-original look at
+    /// the whole frame, which the preview already covers at fit — counting
+    /// them made every edit after one compare a full render (a 2026-11-06
+    /// session: 23 of 26 full renders on an 8 GB Mac, each 5–136 s).
+    /// Zoom uses the same threshold as `viewportChanged`.
     private var explicitFullRender: Bool {
-        comparing || showingOriginal || (croppedLongEdge > 0
-            && Double(zoomPercent) > 100 * Double(previewLongEdge) / Double(croppedLongEdge))
+        explicitFullRenderReason != nil
+    }
+    private var explicitFullRenderReason: String? {
+        guard croppedLongEdge > 0, !isFit,
+              Double(zoomPercent) > 100 * Double(previewLongEdge) / Double(croppedLongEdge)
+        else { return nil }
+        return "zoom_\(zoomPercent)"
     }
 
     /// The long edge every interactive edit renders at — the engine's `live`
@@ -1777,7 +1786,9 @@ final class Session: CanvasHost {
     }
 
     private func requestNativeOriginal(trigger: String) {
-        if trigger != "idle_delay" {
+        // Only the zoom crossing asks for the frame's own pixels; a compare
+        // or show-original is served by the preview (see explicitFullRender).
+        if trigger == "zoom_past_preview" {
             scheduleFullRender(explicit: true)
         }
         guard let url = selection else { return }
@@ -3830,8 +3841,13 @@ final class Session: CanvasHost {
         // When it fits, the caches are worth more than the headroom.
         if !fits {
             let evicted = diagnostics.arena.evictCaches()
-            log.info(.canvas, "full render cache eviction", [
+            log.info(.canvas, "full render over forecast", [
                 .init("frame", url.lastPathComponent),
+                .init("explicit", explicit),
+                .init("reason", explicitFullRenderReason ?? (explicit ? "request" : fullRenderPolicy.rawValue)),
+                .init("zoom", zoomPercent),
+                .init("fit", isFit),
+                .init("comparing", comparing),
                 .init("evicted_mb", Double(evicted) / 1_000_000),
             ])
         }
