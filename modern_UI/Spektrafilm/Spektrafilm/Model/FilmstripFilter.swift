@@ -3,7 +3,7 @@ import Foundation
 enum FilmstripFilter: Int, CaseIterable, Identifiable {
     case all, one, two, three, four, five, edited, unedited
     var id: Int { rawValue }
-    var title: String {
+    @MainActor var title: String {
         switch self {
         case .all: L("All", zh: "全部")
         case .one, .two, .three, .four: "≥\(rawValue)★"
