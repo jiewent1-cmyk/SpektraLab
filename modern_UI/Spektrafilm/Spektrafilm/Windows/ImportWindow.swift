@@ -244,7 +244,7 @@ private struct ImportSourceImage: View {
             let result = await cache.thumbnail(for: url, maxPixel: maxPixel)
             guard !Task.isCancelled else { return }
             image = result
-            let hasEdits = await Task.detached(priority: .utility) { [url] in Sidecar.load(for: url) != nil }.value
+            let hasEdits = await Task.detached(priority: .utility) { [url] in Sidecar.load(for: url)?.hasUserEdits == true }.value
             guard !Task.isCancelled else { return }
             edited = hasEdits
         }
