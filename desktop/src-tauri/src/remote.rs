@@ -151,9 +151,18 @@ fn escape(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\").replace(' ', "\\ ")
 }
 
-/// The file's own name, or a placeholder for a path without one.
+/// The file's name on the far machine: the local name with every character
+/// outside `[A-Za-z0-9._-]` replaced by `_`. The remote half of an rsync spec
+/// goes through the far machine's shell, so a name with `(`, `&` or a quote
+/// would break it; the folder already makes the name unique and the host only
+/// needs the extension.
 fn file_name(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_string())
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    if safe.trim_matches('.').is_empty() { "file".to_string() } else { safe }
 }
 
 /// The file's size and modification time — the cache key of a copy.
@@ -368,6 +377,13 @@ impl<R: Runtime> Remote<R> {
             })
             .await
             .clone();
+        if result.is_err() {
+            // A failed copy is not a cache entry: the next request tries again.
+            let mut map = self.uploads.lock().await;
+            if map.get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry)) {
+                map.remove(&key);
+            }
+        }
         result
     }
 
@@ -476,6 +492,14 @@ fn set_field(params: &mut Value, field: Option<&'static str>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_names_are_shell_safe() {
+        assert_eq!(file_name(Path::new("/p/DSC_0001.NEF")), "DSC_0001.NEF");
+        assert_eq!(file_name(Path::new("/p/my photo (1)&'x'.cr3")), "my_photo__1___x_.cr3");
+        assert_eq!(file_name(Path::new("/p/照片.dng")), "__.dng");
+        assert_eq!(file_name(Path::new("/")), "file");
+    }
 
     fn config() -> RemoteConfig {
         RemoteConfig {
