@@ -211,7 +211,8 @@ impl HostManager {
             let me = Arc::clone(self);
             tauri::async_runtime::spawn(async move {
                 let status = child.wait().await;
-                me.on_exit(generation, status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()))
+                let code = status.as_ref().ok().and_then(|s| s.code());
+                me.on_exit(generation, status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()), code)
                     .await;
             });
         }
@@ -280,12 +281,12 @@ impl HostManager {
         }
     }
 
-    async fn on_exit(self: &Arc<Self>, generation: u64, status: String) {
+    async fn on_exit(self: &Arc<Self>, generation: u64, status: String, code: Option<i32>) {
         if self.generation.load(Ordering::SeqCst) != generation {
             return; // superseded (restart or fail_and_kill)
         }
         *self.conn.lock().await = None;
-        let reason = format!("the engine host exited ({status})");
+        let reason = self.exit_reason(&status, code);
         log::warn!(target: "host", "{reason}");
         self.fail_pending("host_exited", &reason);
         if self.shutting_down.load(Ordering::SeqCst) {
@@ -310,6 +311,21 @@ impl HostManager {
         self.set_state(json!({"phase": "restarting", "reason": reason, "attempt": attempt}));
         tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
         self.start().await;
+    }
+
+    /// What the exit means. `ssh` exits 255 when it cannot reach the far
+    /// machine — the one failure the user can act on, and the one remote mode
+    /// makes likely (the laptop asleep, the name changed).
+    fn exit_reason(&self, status: &str, code: Option<i32>) -> String {
+        if code == Some(255) {
+            let tail = self.stderr_tail.lock().unwrap().iter().cloned().collect::<Vec<_>>().join("\n");
+            return if tail.is_empty() {
+                "the engine host is on another machine and ssh could not reach it (exit 255)".to_string()
+            } else {
+                format!("the engine host is on another machine and ssh could not reach it (exit 255): {tail}")
+            };
+        }
+        format!("the engine host exited ({status})")
     }
 
     /// Restart on request (menu: Restart Render Service). Resets the budget.
@@ -385,6 +401,10 @@ impl HostManager {
     }
 }
 
+/// The host's own name. Windows adds the extension; macOS uses the same name
+/// as Linux — there is no macOS host build (the engine runs on the Linux box
+/// and is reached over ssh), so the name only matters for the development
+/// fallback below.
 fn exe_name() -> &'static str {
     if cfg!(windows) {
         "spektralab-host.exe"
@@ -396,6 +416,11 @@ fn exe_name() -> &'static str {
 fn platform_dir() -> &'static str {
     if cfg!(windows) {
         "host-win-x64"
+    } else if cfg!(target_os = "macos") {
+        // No host is built for macOS: the engine runs on the Linux box and is
+        // reached over ssh (see `remote.rs`). The name is here so that the
+        // development fallback looks in the right place and says so.
+        "host-macos-arm64"
     } else {
         "host-linux-x64"
     }
@@ -417,6 +442,9 @@ fn launch_in_dir(dir: &Path, origin: &str) -> Option<Launch> {
 
 /// Where the host is, in order:
 ///
+/// 0. **Remote mode** — `SPEKTRALAB_REMOTE` (or `remote.json`) names an ssh
+///    target: the host runs on another machine and the frames travel over
+///    ssh. Nothing local is needed.
 /// 1. `SPEKTRALAB_MOCK_HOST=1` — the TypeScript mock (`desktop/mock-host`),
 ///    run with `node`; `SPEKTRALAB_MOCK_HOST_SCRIPT` overrides the script.
 /// 2. `SPEKTRALAB_HOST_DIR` — a staged host directory (development).
@@ -424,6 +452,12 @@ fn launch_in_dir(dir: &Path, origin: &str) -> Option<Launch> {
 ///    executable (Tauri `externalBin`), resources at `<resource_dir>/host/engine`.
 /// 4. A checkout's `build/host-<os>-x64/` above the executable (a dev build).
 pub fn resolve_launch<R: Runtime>(app: &AppHandle<R>) -> Result<Launch, String> {
+    // Remote mode comes first: it is a different machine, not a different
+    // copy of the same one.
+    if let Some(cfg) = crate::remote::RemoteConfig::load(app) {
+        log::info!(target: "host", "remote mode: ssh {} at {}", cfg.target, cfg.root.display());
+        return Ok(cfg.launch());
+    }
     if std::env::var("SPEKTRALAB_MOCK_HOST").map(|v| v == "1").unwrap_or(false) {
         let script = std::env::var("SPEKTRALAB_MOCK_HOST_SCRIPT").map(PathBuf::from).unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("mock-host").join("main.ts")
@@ -466,7 +500,7 @@ pub fn resolve_launch<R: Runtime>(app: &AppHandle<R>) -> Result<Launch, String> 
         }
     }
     Err(format!(
-        "SpektraLab could not find its engine host ({}). Reinstall the app, or set SPEKTRALAB_HOST_DIR.",
+        "SpektraLab could not find its engine host ({}). Reinstall the app, set SPEKTRALAB_HOST_DIR, or set SPEKTRALAB_REMOTE to render on another machine.",
         exe_name()
     ))
 }

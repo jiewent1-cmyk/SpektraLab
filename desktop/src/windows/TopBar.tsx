@@ -21,6 +21,7 @@ export function TopBar() {
   const original = useSession((s) => s.showingOriginal);
   const comparing = useSession((s) => s.comparing);
   const status = useSession((s) => s.status);
+  const transfer = useSession((s) => s.transfer);
   const view = useSession((s) => s.view);
   const native = useSession((s) => s.nativeSize);
   const hello = useSession((s) => s.hello);
@@ -63,9 +64,9 @@ export function TopBar() {
       <button className={'action-pill' + (original ? ' active' : '')} disabled={!selection} onClick={() => setOriginal(!original)} title={tz('Show the camera’s own rendering, before any film simulation (Space, while held).', '显示相机自身的渲染，未经胶片模拟（按住空格键）。')}>
         {t('actionOriginal')}
       </button>
-      <span className="bar-status" data-testid="status" title={status || info}>
+      <span className="bar-status" data-testid="status" title={transfer || status || info}>
         {developing ? '⏳ ' : ''}
-        {status || info}
+        {transfer || status || info}
       </span>
       <button className={'icon-btn' + (comparing ? ' active' : '')} style={{ width: 34 }} disabled={!selection} onClick={toggleCompare} title={t('helpBeforeAfter') + ' (Y)'}>
         <BeforeAfter />

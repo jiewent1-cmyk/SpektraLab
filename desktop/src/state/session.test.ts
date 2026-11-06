@@ -30,7 +30,7 @@ vi.mock('../platform', () => ({
   dirName: (p: string) => p,
 }));
 
-import { recomputeFilmFormat, sessionStore, setDecode, setGeometry, setParams, undo } from './session';
+import { _internals, recomputeFilmFormat, sessionStore, setDecode, setGeometry, setParams, undo } from './session';
 import type { HelloResult } from '@shared/protocol';
 import { settingsStore } from './settings';
 import { newSidecar } from '@shared/sidecar';
@@ -102,5 +102,26 @@ describe('white balance at decode (R2)', () => {
     setDecode((d) => ({ ...d, whiteBalance: 'Custom', temperature: 3200 }));
     await vi.waitFor(() => expect(calls).toContain('render:live'));
     expect(calls.some((c) => c.startsWith('redecode'))).toBe(false);
+  });
+});
+
+describe('the copy to and from the render host (remote mode)', () => {
+  it('says which way the file is going, and stops when it is done', () => {
+    const { noteTransfer } = _internals();
+    noteTransfer({ direction: 'up', path: '/x/a.cr2', done: false });
+    expect(sessionStore.getState().transfer).toMatch(/Uploading/);
+    noteTransfer({ direction: 'up', path: '/x/a.cr2', done: true });
+    expect(sessionStore.getState().transfer).toBe('');
+    noteTransfer({ direction: 'down', path: '/x/out.tif', done: false });
+    expect(sessionStore.getState().transfer).toMatch(/Downloading/);
+    noteTransfer({ direction: 'down', path: '/x/out.tif', done: true });
+    expect(sessionStore.getState().transfer).toBe('');
+  });
+
+  it('a failed copy says so, in the status line', () => {
+    const { noteTransfer } = _internals();
+    noteTransfer({ direction: 'up', path: '/x/b.cr2', done: true, error: 'rsync failed' });
+    expect(sessionStore.getState().transfer).toBe('');
+    expect(sessionStore.getState().status).toMatch(/rsync failed/);
   });
 });

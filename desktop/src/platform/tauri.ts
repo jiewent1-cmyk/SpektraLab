@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ask, message, open, save } from '@tauri-apps/plugin-dialog';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
-import type { AppPaths, FileEntry, Platform } from './index';
+import type { AppPaths, FileEntry, Platform, RemoteTransfer } from './index';
 
 export function tauriPlatform(): Platform {
   return {
@@ -58,6 +58,10 @@ export function tauriPlatform(): Platform {
       const un = getCurrentWebview().onDragDropEvent((e) => {
         if (e.payload.type === 'drop') cb(e.payload.paths);
       });
+      return () => void un.then((f) => f());
+    },
+    onRemoteTransfer(cb) {
+      const un = listen<RemoteTransfer>('remote_transfer', (e) => cb(e.payload));
       return () => void un.then((f) => f());
     },
     setTitle: (title) => getCurrentWindow().setTitle(title),

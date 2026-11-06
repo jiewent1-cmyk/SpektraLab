@@ -2,7 +2,7 @@
   "name": "spektralab",
   "productName": "SpektraLab",
   "version": "1.3.1",
-  "description": "SpektraLab — film and print emulation for Linux and Windows",
+  "description": "SpektraLab — film and print emulation for Linux, Windows and macOS",
   "license": "GPL-3.0-or-later",
   "author": {
     "name": "SpektraLab contributors"
@@ -16,6 +16,7 @@
     "build:web": "vite build",
     "predev:web": "node scripts/copy-assets.mjs",
     "prebuild:web": "node scripts/copy-assets.mjs",
+    "build:mac": "tauri build",
     "tauri": "tauri",
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json",
     "lint": "eslint --max-warnings 0 .",

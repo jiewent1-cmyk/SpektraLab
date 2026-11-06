@@ -180,3 +180,25 @@ build/host-linux-x64/            build/host-win-x64/
 packaging). The Tauri core (Rust) launches
 `resources/host/spektralab-host[.exe] --resources resources/host/engine`.
 In development, `SPEKTRALAB_HOST_DIR` overrides the directory.
+
+### 4.1 The host on another machine (remote mode)
+
+The core can drive a host that is not on this machine: with `SPEKTRALAB_REMOTE`
+set (an ssh target), the launch becomes
+
+```
+ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+    <target> '<root>/host/spektralab-host --resources <root>/host/engine' [--device N]
+```
+
+The frames are the host's own, unchanged: **this file describes the same
+protocol either way**, and the host needs to know nothing about it.
+
+What the core does around it, because the host reads and writes *its* own
+filesystem: a file the request names as an input is copied to
+`<root>/inbox/<sha1(absolute path)[:16]>/<name>` first, and the request
+carries that path; a file the request names as an output is written to
+`<root>/out/<uuid>/<name>` and copied back afterwards, and the answer's
+`path` is the local one again. The copies are announced to the webview as
+`remote_transfer` events (`{direction, path, done, error?}`), which are the
+core's own events, not the host's.

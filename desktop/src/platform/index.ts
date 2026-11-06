@@ -23,6 +23,18 @@ export interface AppPaths {
   version: string;
 }
 
+/**
+ * A copy to or from the render host, in remote mode. `up` is a photograph
+ * going to the machine that renders it, `down` is a finished file coming
+ * back.
+ */
+export interface RemoteTransfer {
+  direction: 'up' | 'down';
+  path: string;
+  done: boolean;
+  error?: string;
+}
+
 export interface Platform {
   readonly kind: 'tauri' | 'browser';
   listImages(dir: string): Promise<FileEntry[]>;
@@ -45,6 +57,8 @@ export interface Platform {
   confirm(title: string, text: string): Promise<boolean>;
   onOpenPaths(cb: (paths: string[]) => void): () => void;
   onDrop(cb: (paths: string[]) => void): () => void;
+  /** The copies to and from the render host (remote mode). */
+  onRemoteTransfer(cb: (t: RemoteTransfer) => void): () => void;
   setTitle(title: string): Promise<void>;
   log(level: 'info' | 'warn' | 'error', message: string): void;
   toggleFullscreen(): Promise<void>;

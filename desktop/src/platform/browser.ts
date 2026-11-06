@@ -72,6 +72,9 @@ export function browserPlatform(): Platform {
       dropListeners.add(cb);
       return () => dropListeners.delete(cb);
     },
+    onRemoteTransfer() {
+      return () => {};
+    },
     setTitle: async (t) => void (document.title = t),
     log: (level, m) => console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](m),
     toggleFullscreen: async () => {

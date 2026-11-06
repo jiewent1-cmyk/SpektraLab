@@ -5,6 +5,7 @@
 pub mod files;
 pub mod framing;
 pub mod host;
+pub mod remote;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -12,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, Wry};
 
 use host::HostManager;
 
@@ -21,6 +22,8 @@ struct AppState {
     sidecars: files::SidecarStore,
     /// Paths from the command line (open-with) not yet taken by the webview.
     launch_paths: Mutex<Vec<String>>,
+    /// The machine the engine host runs on, when it is not this one.
+    remote: Option<Arc<remote::Remote<Wry>>>,
 }
 
 fn reply_bytes(reply: host::Reply) -> Response {
@@ -42,6 +45,46 @@ fn timeout_of(ms: Option<u64>) -> Duration {
     Duration::from_millis(ms.unwrap_or(120_000).clamp(1_000, 3_600_000))
 }
 
+/// The remote half of a request: copy the request's files up, and put the
+/// local paths back into the answer. Nothing happens without a remote host.
+async fn prepare(
+    far: Option<&remote::Remote<Wry>>,
+    method: &str,
+    params: Value,
+) -> Result<(Value, remote::Plan), host::HostError> {
+    match far {
+        Some(r) => r.prepare(method, params).await,
+        None => Ok((params, remote::Plan::default())),
+    }
+}
+
+/// The answer on its way back: the far machine's paths become the local ones,
+/// and a file the host wrote is copied down to where the user asked for it.
+async fn finish(
+    far: Option<&remote::Remote<Wry>>,
+    reply: host::Reply,
+    plan: &remote::Plan,
+) -> host::Reply {
+    let Some(far) = far else { return reply };
+    match reply {
+        Ok((mut header, payload)) => {
+            if header["ok"] == json!(true) {
+                far.restore(&mut header["result"], plan);
+                if let Err(e) = far.fetch_back(plan).await {
+                    return Err(host::HostError::new("io_error", e));
+                }
+            } else {
+                far.discard(plan).await;
+            }
+            Ok((header, payload))
+        }
+        Err(e) => {
+            far.discard(plan).await;
+            Err(e)
+        }
+    }
+}
+
 /// One host request. The reply is the protocol's framing (header + pixels) as
 /// one binary response; `src/host/client.ts` splits it.
 #[tauri::command]
@@ -51,7 +94,12 @@ async fn host_request(
     params: Value,
     timeout_ms: Option<u64>,
 ) -> Result<Response, String> {
+    let (params, plan) = match prepare(state.remote.as_deref(), &method, params).await {
+        Ok(v) => v,
+        Err(e) => return Ok(reply_bytes(Err(e))),
+    };
     let reply = state.host.request(&method, params, Vec::new(), timeout_of(timeout_ms)).await;
+    let reply = finish(state.remote.as_deref(), reply, &plan).await;
     Ok(reply_bytes(reply))
 }
 
@@ -66,7 +114,12 @@ async fn host_request_upload(state: State<'_, AppState>, request: Request<'_>) -
     let method = header["method"].as_str().ok_or("missing method")?.to_string();
     let params = header.get("params").cloned().unwrap_or(json!({}));
     let timeout = timeout_of(header.get("timeout_ms").and_then(Value::as_u64));
+    let (params, plan) = match prepare(state.remote.as_deref(), &method, params).await {
+        Ok(v) => v,
+        Err(e) => return Ok(reply_bytes(Err(e))),
+    };
     let reply = state.host.request(&method, params, payload.to_vec(), timeout).await;
+    let reply = finish(state.remote.as_deref(), reply, &plan).await;
     Ok(reply_bytes(reply))
 }
 
@@ -222,11 +275,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let sidecar_dir = app.path().app_data_dir()?.join("Sidecars");
             let host = HostManager::new(handle.clone());
+            // The engine host may live on another machine: `SPEKTRALAB_REMOTE`
+            // (or `<app config dir>/remote.json`) says which one.
+            let remote = remote::RemoteConfig::load(&handle).map(|cfg| {
+                log::info!("SpektraLab: the engine host is on {} ({})", cfg.target, cfg.root.display());
+                remote::Remote::new(cfg, handle.clone())
+            });
             let argv: Vec<String> = std::env::args().collect();
             app.manage(AppState {
                 host: Arc::clone(&host),
                 sidecars: files::SidecarStore { dir: sidecar_dir },
                 launch_paths: Mutex::new(file_args(&argv)),
+                remote,
             });
             log::info!("SpektraLab {} starting on {}", app.package_info().version, std::env::consts::OS);
             tauri::async_runtime::spawn(async move { host.start().await });

@@ -3,6 +3,83 @@
 Running log for whoever picks this up next (a restarted worker or a human).
 Newest state first in each list. Read with `git log --oneline -20 -- desktop`.
 
+## Status (2026-11-06, remote mode — the engine host on another machine)
+
+The app can run on the Mac while the engine renders on the Linux box (ROG).
+The photographs never leave the Mac: they are **copied** up to the far
+machine, rendered there, and the finished file is copied back to where the
+user asked for it. The sidecars stay in the app's own store on the Mac, and
+the originals are never moved or deleted.
+
+**Switching it on** (environment first, then the app's own file):
+
+| | |
+|---|---|
+| `SPEKTRALAB_REMOTE` | the ssh target, e.g. `ROG-laptop`. Set it and the app is remote. |
+| `SPEKTRALAB_REMOTE_ROOT` | where the host is deployed there (default `/home/jacky/spektralab`). |
+| `SPEKTRALAB_HOST_DEVICE` | passed straight to the far host as `--device`. |
+| `<app config dir>/remote.json` | the same three fields, lower-cased: `remote`, `remote_root`, `host_device`. The environment wins. |
+
+```bash
+SPEKTRALAB_REMOTE=ROG-laptop npm run dev      # or SPEKTRALAB_REMOTE=ROG-laptop npm run build:mac
+```
+
+The remote check comes **first** in `resolve_launch`: with `SPEKTRALAB_REMOTE`
+set, the mock host and `SPEKTRALAB_HOST_DIR` are not consulted either.
+
+**What the far machine needs** (`/home/jacky/spektralab/`):
+
+```
+host/spektralab-host          the host binary
+host/engine/                  its resources (baked engine, .spv, io/*.icc)
+inbox/<sha1(path)[:16]>/      the copies of the photographs (created on demand)
+out/<uuid>/                   one export at a time (removed after it is copied back)
+```
+
+**How it works** (`src-tauri/src/remote.rs`):
+
+- The launch is `ssh -T -o BatchMode=yes -o ServerAliveInterval=15
+  -o ServerAliveCountMax=4 <target> '<root>/host/spektralab-host --resources
+  '<root>/host/engine' [--device N]`. The frames on stdin/stdout are the
+  host's own — **HOST-PROTOCOL.md is unchanged** and knows nothing of this.
+- `probe` / `thumbnail` / `open` (`params.path`) and `write_image`
+  (`params.source_path`) are copied up with `rsync -a --partial` (over the
+  same ssh options, so rsync never asks for a password), into
+  `<root>/inbox/<sha1(absolute path)[:16]>/<name>`. The copy is cached by
+  (path, size, mtime): an unchanged file is not copied again, and two
+  requests for the same file at the same time share one copy.
+- `export_image` / `write_image` / `export_cube` / `export_di`
+  (`params.path`) are written to `<root>/out/<uuid>/<name>` and copied back to
+  the local path the user chose; the answer's `path` is the local one again.
+  A destination that exists and is not marked `overwrite` is refused with the
+  host's own `io_error` before anything is copied.
+- The copies are announced as `remote_transfer` events
+  (`{direction:"up"|"down", path, done, error?}`); the status bar says
+  "Uploading…/Downloading…".
+- `ssh` exiting 255 is reported as "could not reach the engine host over
+  ssh" — the restart-and-re-open-the-frame logic is the same as local.
+
+**macOS build.** `src-tauri/tauri.macos.conf.json` is picked up automatically
+on macOS: the bundle target is `app` (no deb/appimage/nsis), the icon list
+carries the `.icns`, and there is no sidecar — the host is over ssh. So:
+
+```bash
+npm run build:mac          # or: npm run tauri build
+# → src-tauri/target/release/bundle/macos/SpektraLab.app
+```
+
+Two things that build needs and this snapshot does not have: `modern_UI/`
+(for `npm run build:web`'s asset copy — the stock catalogue and the film
+covers) and, for the Linux/Windows bundles, `license/LICENSE`. The macOS
+bundle therefore carries no licence text yet: put the GPL-3.0 file back
+(`"licenseFile": "../../license/LICENSE"` in `tauri.macos.conf.json`) when the
+full tree is here.
+
+**Not done / next:** the inbox is never cleaned up (it grows with the number
+of photographs opened); there is no progress bar for a copy, only a label; the
+`.cube` export goes through the same path, but the frontend never passes
+`overwrite` for it, so an existing file is refused — as it is locally.
+
 ## Status (2026-10-06, finish-up pass)
 
 What the finish-up pass added on top of the first pass below:

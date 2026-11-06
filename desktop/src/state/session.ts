@@ -34,7 +34,7 @@ import { decodeWire, isRawPath, modeOf } from '@shared/whiteBalance';
 import { type ClipboardGroup, type SettingsClip, CLIPBOARD_GROUPS, applyClip, clipChanges } from '@shared/clipboard';
 import { EMPTY_CATALOG, type StockCatalog, loadCatalog } from '@shared/stocks';
 import { HostCallError, host } from '../host/client';
-import { type FileEntry, baseName, dirName, platform } from '../platform';
+import { type FileEntry, type RemoteTransfer, baseName, dirName, platform } from '../platform';
 import { settingsStore } from './settings';
 import { frameImages, makeThumbFromPrint } from './frames';
 import { thumbs } from './thumbs';
@@ -85,6 +85,8 @@ export interface SessionState {
   badge: Tier | null;
   developing: boolean;
   status: string;
+  /** What the copy to or from the render host is doing (remote mode). */
+  transfer: string;
   lastError: string | null;
   // view
   tool: Tool;
@@ -127,9 +129,11 @@ const INITIAL: SessionState = {
   redecoding: false,
   imageVersion: 0,
   badge: null,
-  developing: false,
-  status: '',
-  lastError: null,
+developing: false,
+status: '',
+transfer: '',
+lastError: null,
+
   tool: 'select',
   fitZoom: 1,
   canvasPx: { width: 1, height: 1 },
@@ -839,6 +843,26 @@ export function setStatus(status: string) {
 
 // --------------------------------------------------------------------- boot
 
+/** The copies in flight to or from the render host (remote mode). */
+const transfers = new Map<string, RemoteTransfer>();
+
+/**
+ * A copy is going on (remote mode). The status line says which way, so a
+ * 45 MP upload does not look like a hang.
+ */
+function noteTransfer(t: RemoteTransfer) {
+  if (t.done) transfers.delete(t.path);
+  else transfers.set(t.path, t);
+  const first = [...transfers.values()][0];
+  const label = !first
+    ? ''
+    : first.direction === 'up'
+      ? tz('Uploading to the render host…', '正在上传到渲染主机…')
+      : tz('Downloading from the render host…', '正在从渲染主机下载…');
+  set({ transfer: label });
+  if (t.done && t.error) set({ status: tz(`Transfer failed: ${t.error}`, `传输失败：${t.error}`) });
+}
+
 let lastReadyHello: unknown = null;
 
 function takeHostState(st: HostState) {
@@ -882,6 +906,7 @@ function takeHostState(st: HostState) {
 
 export async function boot() {
   host().onState(takeHostState);
+  platform().onRemoteTransfer(noteTransfer);
   void loadCatalog().then((catalog) => set({ catalog }));
   takeHostState(await host().state());
   platform().onOpenPaths((paths) => void openPaths(paths));
@@ -893,5 +918,5 @@ export async function boot() {
 
 /** For tests and the export run. */
 export function _internals() {
-  return { get, set };
+  return { get, set, noteTransfer };
 }
