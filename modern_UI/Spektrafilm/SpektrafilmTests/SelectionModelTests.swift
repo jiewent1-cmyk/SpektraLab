@@ -99,9 +99,10 @@ final class SelectionModelTests: XCTestCase {
         session.filmstripFilter = .three
         XCTAssertEqual(session.frames.count, 4)
         XCTAssertEqual(session.selection, urls[0])
-        XCTAssertEqual(session.selectedFrames, [urls[1], urls[3]])
+        // The open frame stays picked even when the filter hides it.
+        XCTAssertEqual(session.selectedFrames, [urls[0], urls[1], urls[3]])
         session.selectAllFrames()
-        XCTAssertEqual(session.selectedFrames, [urls[1], urls[3]])
+        XCTAssertEqual(session.selectedFrames, [urls[0], urls[1], urls[3]])
         session.selectRelative(1)
         XCTAssertEqual(session.selection, urls[1])
         session.click(urls[3], command: false, shift: true)
