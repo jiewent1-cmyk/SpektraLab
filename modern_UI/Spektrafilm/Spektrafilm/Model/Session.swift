@@ -782,6 +782,42 @@ final class Session: CanvasHost {
     /// wait is right; 400 ms is a slider release and one breath.
     nonisolated static let fullRenderDebounceMs = 400
 
+    enum FullRenderPolicy: String, CaseIterable, Sendable {
+        case auto, always, never
+    }
+    nonisolated static let fullRenderPolicyKey = Session.uiKey + "fullRenderPolicy"
+    nonisolated static func fullRenderPolicy(in defaults: UserDefaults) -> FullRenderPolicy {
+        defaults.string(forKey: fullRenderPolicyKey).flatMap(FullRenderPolicy.init(rawValue:)) ?? .auto
+    }
+    nonisolated static func shouldAutoRenderFull(policy: FullRenderPolicy,
+                                                projectionFits: Bool,
+                                                allowOverReserve: Bool) -> Bool {
+        switch policy {
+        case .auto: return projectionFits || allowOverReserve
+        case .always: return true
+        case .never: return false
+        }
+    }
+    /// Explicit inspection must remain possible even when background work is disabled.
+    nonisolated static func shouldRenderFull(policy: FullRenderPolicy, projectionFits: Bool,
+                                            allowOverReserve: Bool, explicit: Bool) -> Bool {
+        explicit || shouldAutoRenderFull(policy: policy, projectionFits: projectionFits,
+                                         allowOverReserve: allowOverReserve)
+    }
+    private(set) var fullRenderPolicy = Session.fullRenderPolicy(in: .standard)
+    func setFullRenderPolicy(_ policy: FullRenderPolicy) {
+        fullRenderPolicy = policy
+        UserDefaults.standard.set(policy.rawValue, forKey: Self.fullRenderPolicyKey)
+        scheduleFullRender()
+    }
+
+    /// Keep explicit inspection active across live edits; zoom uses the same
+    /// threshold as viewportChanged, including the existing 100% menu action.
+    private var explicitFullRender: Bool {
+        comparing || showingOriginal || (croppedLongEdge > 0
+            && Double(zoomPercent) > 100 * Double(previewLongEdge) / Double(croppedLongEdge))
+    }
+
     /// The long edge every interactive edit renders at — the engine's `live`
     /// tier, and what the app sends as `preview_long_edge`.
     private(set) var previewLongEdge: Int = Session.previewEdge(in: .standard)
@@ -1741,6 +1777,9 @@ final class Session: CanvasHost {
     }
 
     private func requestNativeOriginal(trigger: String) {
+        if trigger != "idle_delay" {
+            scheduleFullRender(explicit: true)
+        }
         guard let url = selection else { return }
         guard let d = decoded else {
             Task {
@@ -3685,17 +3724,19 @@ final class Session: CanvasHost {
     /// keeps a dragged slider from starting one per step; the generation is
     /// what keeps a slow render from landing on a frame or a grade the user
     /// has moved on from.
-    private func scheduleFullRender() {
+    private func scheduleFullRender(explicit: Bool = false) {
         fullTask?.cancel()
         fullTask = nil
         fullPending = false
         guard wantsFullRender, let url = selection, let sid = serviceSessionID else { return }
+        let explicit = explicit || explicitFullRender
+        guard explicit || fullRenderPolicy != .never else { return }
         fullGeneration += 1
         let gen = fullGeneration
         fullTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(Session.fullRenderDebounceMs))
             guard let self, !Task.isCancelled, gen == self.fullGeneration else { return }
-            await self.renderFullRender(for: url, sessionID: sid, generation: gen)
+            await self.renderFullRender(for: url, sessionID: sid, generation: gen, explicit: explicit)
         }
     }
 
@@ -3747,15 +3788,52 @@ final class Session: CanvasHost {
         }
     }
 
-    private func renderFullRender(for url: URL, sessionID sid: String, generation gen: Int) async {
+    private func renderFullRender(for url: URL, sessionID sid: String, generation gen: Int, explicit: Bool) async {
         // The transport is single-flight, so this sits in front of the user's
         // next slider release. The rule is the one the ladder used: never
         // start one while an edit is owed a render — wait for the scheduler to
         // go idle and ask again, rather than dropping it.
         guard !busy, !scheduler.pending, selection == url, serviceSessionID == sid,
               gen == fullGeneration, wantsFullRender else {
-            if selection == url, serviceSessionID == sid { scheduleFullRender() }
+            if selection == url, serviceSessionID == sid, gen == fullGeneration {
+                scheduleFullRender(explicit: explicit)
+            }
             return
+        }
+        // Decide at submission time: the debounce may outlive a change in
+        // memory pressure or settings. Skipping leaves the preview badge intact.
+        var fits = true
+        if let size = decoded?.pixelSize {
+            let projection = diagnostics.projection(pixels: developForecastPixels(size))
+            fits = projection.fits
+            guard Self.shouldRenderFull(policy: fullRenderPolicy, projectionFits: projection.fits,
+                                        allowOverReserve: diagnostics.allowOverReserve,
+                                        explicit: explicit) else {
+                if fullRenderPolicy == .auto {
+                    log.info(.canvas, "full render skipped", [
+                        .init("frame", url.lastPathComponent),
+                        .init("forecast_mb", projection.forecastMB),
+                        .init("free_mb", projection.freeMB),
+                        .init("reserve_mb", projection.reserveMB),
+                        .init("reason", "memory_admission"),
+                    ])
+                }
+                return
+            }
+        } else if !explicit && fullRenderPolicy != .always {
+            // Without frame dimensions there is no safe automatic forecast.
+            return
+        }
+        // Only when the forecast does not fit (an explicit request, or
+        // `always`): drop cache references — other frames' prints, idle
+        // scratch, thumbnails — never pinned canvas/decode/engine holdings.
+        // When it fits, the caches are worth more than the headroom.
+        if !fits {
+            let evicted = diagnostics.arena.evictCaches()
+            log.info(.canvas, "full render cache eviction", [
+                .init("frame", url.lastPathComponent),
+                .init("evicted_mb", Double(evicted) / 1_000_000),
+            ])
         }
         fullPending = true
         startClock()
@@ -4158,9 +4236,9 @@ final class Session: CanvasHost {
     /// Forecast what this frame will cost before the engine takes it on, and
     /// record the answer either way (§11.5).
     ///
-    /// The message is not a refusal: nothing here blocks. What it buys is that
-    /// the app cannot sail into a swap storm *silently* — the user is told, the
-    /// log says so, and `overrideMemoryWarning` is the door out.
+    /// This records a warning; admission for automatic full renders happens
+    /// separately before submission. Explicit work still warns and can proceed
+    /// through `overrideMemoryWarning`.
     @discardableResult
     private func noteProjection(pixels: Int, operation: String) -> Diagnostics.MemoryProjection {
         let projection = diagnostics.noteProjection(pixels: pixels, operation: operation,
