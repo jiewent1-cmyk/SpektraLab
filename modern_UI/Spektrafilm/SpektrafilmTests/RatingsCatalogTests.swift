@@ -147,4 +147,49 @@ final class RatingsCatalogTests: XCTestCase {
         Ratings.set(5, for: a)
         XCTAssertNil(Sidecar.load(for: a))
     }
+
+    // MARK: migration from Ratings.json
+
+    private func writeLegacy(_ table: [String: Int]) throws {
+        try FileManager.default.createDirectory(at: Ratings.legacyURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try JSONEncoder().encode(table).write(to: Ratings.legacyURL)
+        Ratings.reload()
+    }
+
+    func testLegacyRatingsAreAdoptedAndTheFileRetiredWhenDone() throws {
+        let a = try photo("a.NEF"), b = try photo("b.NEF")
+        try writeLegacy([Sidecar.key(for: a): 4, Sidecar.key(for: b): 2])
+        XCTAssertEqual(Ratings.rating(for: a), 4)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Ratings.legacyURL.path), "b not migrated yet")
+        XCTAssertEqual(Ratings.rating(for: b), 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Ratings.legacyURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Ratings.legacyURL.path + ".migrated"))
+        // Now in the catalog: survives a rename, which the JSON key never did.
+        let renamed = dir.appending(path: "renamed.NEF")
+        try FileManager.default.moveItem(at: a, to: renamed)
+        Ratings.reload()
+        XCTAssertEqual(Ratings.rating(for: renamed), 4)
+    }
+
+    func testAClearedMigratedRatingIsNotBroughtBack() throws {
+        let a = try photo("a.NEF"), b = try photo("b.NEF")
+        try writeLegacy([Sidecar.key(for: a): 5, Sidecar.key(for: b): 1])
+        Ratings.set(0, for: a)          // never looked at first: set must adopt, then clear
+        Ratings.reload()                // Ratings.json still there (b pending)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Ratings.legacyURL.path))
+        XCTAssertEqual(Ratings.rating(for: a), 0)
+    }
+
+    func testAnUnreadableLegacyFileIsLeftAlone() throws {
+        let garbage = Data("{not json".utf8)
+        try FileManager.default.createDirectory(at: Ratings.legacyURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try garbage.write(to: Ratings.legacyURL)
+        Ratings.reload()
+        let a = try photo("a.NEF")
+        XCTAssertEqual(Ratings.rating(for: a), 0)
+        Ratings.set(3, for: a)
+        XCTAssertEqual(try Data(contentsOf: Ratings.legacyURL), garbage)
+    }
 }

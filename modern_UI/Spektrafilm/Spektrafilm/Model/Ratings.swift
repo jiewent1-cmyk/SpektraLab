@@ -62,7 +62,8 @@ enum Ratings {
     static func rating(for image: URL) -> Int {
         let path = image.standardizedFileURL.path
         if let memo = memo[path] { return memo }
-        let stars = catalog()?.row(for: image)?.rating ?? 0
+        guard let db = catalog() else { return 0 }
+        let stars = (db.row(for: image) ?? adoptLegacy(image, into: db))?.rating ?? 0
         memo[path] = stars
         return stars
     }
@@ -71,7 +72,7 @@ enum Ratings {
     static func set(_ stars: Int, for image: URL) {
         let stars = min(max(stars, range.lowerBound), range.upperBound)
         guard let db = catalog() else { return }
-        let row = db.row(for: image)
+        let row = db.row(for: image) ?? adoptLegacy(image, into: db)
         guard (row?.rating ?? 0) != stars else { return }
         let ok: Bool
         if stars == 0 {
@@ -101,6 +102,52 @@ enum Ratings {
     static func reload() {
         memo = [:]
         open = nil
+        legacy = nil
+    }
+
+    // MARK: - migration from Ratings.json (custom builds only)
+
+    /// The JSON table earlier custom builds wrote, keyed by
+    /// `Sidecar.key(for:)`. That key is a path digest and cannot be turned back
+    /// into a path, so the table is migrated lazily: the first time a frame is
+    /// looked up and the catalog has no row for it, its entry is copied into
+    /// the catalog with the file's identity as it is now. The catalog records
+    /// each migrated key (`legacy_json`), so a rating cleared afterwards is not
+    /// brought back. The file is only read; once every entry is migrated it is
+    /// renamed `Ratings.json.migrated`. An unreadable file is left untouched.
+    static var legacyURL: URL {
+        Sidecar.storeDirectory.deletingLastPathComponent().appending(path: "Ratings.json")
+    }
+
+    private static var legacy: [String: Int]?
+
+    private static func legacyTable() -> [String: Int] {
+        if let legacy { return legacy }
+        var table: [String: Int] = [:]
+        if let data = try? Data(contentsOf: legacyURL) {
+            if let decoded = try? JSONDecoder().decode([String: Int].self, from: data) {
+                table = decoded.filter { (1...5).contains($0.value) }
+            } else {
+                logger.error("Ratings.json unreadable; left in place, not migrated")
+            }
+        }
+        legacy = table
+        return table
+    }
+
+    private static func adoptLegacy(_ image: URL, into db: Catalog) -> Catalog.Row? {
+        let table = legacyTable()
+        guard !table.isEmpty else { return nil }
+        let key = Sidecar.key(for: image)
+        guard let stars = table[key], !db.legacyMigrated(key) else { return nil }
+        guard db.write(stars, for: image, replacing: nil), db.markLegacyMigrated(key) else { return nil }
+        if db.legacyMigratedCount(of: Array(table.keys)) == table.count {
+            let done = URL(fileURLWithPath: legacyURL.path + ".migrated")
+            try? FileManager.default.removeItem(at: done)
+            try? FileManager.default.moveItem(at: legacyURL, to: done)
+            legacy = [:]
+        }
+        return db.row(for: image)
     }
 
     // MARK: - private
@@ -159,7 +206,9 @@ private final class Catalog {
         sqlite3_busy_timeout(handle, 2000)
         guard scalarText("PRAGMA quick_check") == "ok",
               exec("PRAGMA journal_mode=WAL"),
-              migrate() else {
+              migrate(),
+              // Custom builds only, outside the versioned schema.
+              exec("CREATE TABLE IF NOT EXISTS legacy_json (key TEXT PRIMARY KEY)") else {
             logger.error("catalog failed its check: \(self.url.path, privacy: .public)")
             sqlite3_close_v2(handle)
             db = nil
@@ -307,6 +356,25 @@ private final class Catalog {
         rows(where: "size = ? AND head_digest = ?", [.int(Int64(size)), .text(headDigest)], withPath: true)
             .compactMap(\.path)
             .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    func legacyMigrated(_ key: String) -> Bool {
+        var found = false
+        query("SELECT 1 FROM legacy_json WHERE key = ?", [.text(key)]) { _ in found = true }
+        return found
+    }
+
+    func markLegacyMigrated(_ key: String) -> Bool {
+        run("INSERT OR IGNORE INTO legacy_json (key) VALUES (?)", [.text(key)])
+    }
+
+    func legacyMigratedCount(of keys: [String]) -> Int {
+        let wanted = Set(keys)
+        var n = 0
+        query("SELECT key FROM legacy_json", []) { s in
+            if let k = Self.text(s, 0), wanted.contains(k) { n += 1 }
+        }
+        return n
     }
 
     // MARK: SQLite plumbing
