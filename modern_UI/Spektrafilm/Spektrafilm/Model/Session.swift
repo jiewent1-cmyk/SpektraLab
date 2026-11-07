@@ -1446,6 +1446,7 @@ final class Session: CanvasHost {
             enqueuePrintWriteback(for: selection)
         }
         ThumbnailCache.shared.clear()
+        Ratings.forgetLookups()
         frames = new
         // One read per frame, for both things the library shows of it.
         let saved = new.map { ($0.id, Sidecar.load(for: $0.id)) }
